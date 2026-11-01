@@ -24,36 +24,32 @@ import timber.log.Timber
 /**
  * Detector for Instagram Reels short-form content.
  *
- * This detector identifies when a user is actively watching Instagram Reels and,
- * crucially, avoids false positives on Direct messages, Stories and Settings —
- * screens the previous implementation wrongly treated as Reels.
+ * Detection keys on the Reels **player's own view ids** rather than on the entry
+ * point, so a Reel is blocked wherever it is opened from (the Reels tab, Explore,
+ * or a Direct message) while Direct chats, the home feed, the Explore grid, Stories
+ * and Settings are left alone.
  *
- * **Detection Strategy:**
- * 1. **Early exit for non-Reels screens**: if a Stories viewer (`reel_viewer`) or a
- *    Direct/inbox screen (`direct_`, `thread_`) node is seen, immediately return false.
- * 2. **Reels tab detection**: if the `clips_tab` node exists and is selected, it's Reels.
- * 3. **Fullscreen Reels detection**: a positive `clips_viewer`/`clips_video` signal
- *    combined with the absence of the bottom navigation (`feed_tab`) indicates Reels
- *    opened from the feed, Explore or a profile.
+ * **Detection strategy (first match wins):**
+ * 1. **Stories** — if a Stories viewer (`reel_viewer`, Instagram's internal name for
+ *    Stories) is present, never block.
+ * 2. **Reels tab** — if the bottom-navigation `clips_tab` is present and selected.
+ * 3. **Fullscreen Reels player** — if the clips viewer (`clips_viewer_view_pager`,
+ *    `clips_viewer_*`) is present *and* the bottom navigation (`feed_tab`) is absent.
+ *    The fullscreen player (Direct reel, Explore reel, immersive Reels) runs without
+ *    the bottom bar, whereas the home feed, Direct chat and Explore grid keep it — so
+ *    requiring `feed_tab` to be absent avoids false positives there.
  *
- * The key fix over the old logic: Reels is only reported on a *positive* Reels signal.
- * The mere absence of `feed_tab` is no longer treated as Reels, because Direct, Stories
- * and Settings also lack it.
+ * The clips viewer is also cached off-screen inside the main activity's view pager;
+ * in that case `feed_tab` is still present, so rule 3 correctly does not fire.
  *
- * **Implementation Details:**
- * - Performs a breadth-first scan of up to 300 nodes. The previous 10-node scan only
- *   reached the bottom navigation, which is why "no feed_tab" became a (wrong) proxy
- *   for Reels.
- * - Instagram reuses `clips_viewer` widely, so detection relies on combined signals
- *   rather than any single node.
+ * **Key player ids (Instagram 2025):** `clips_viewer_view_pager`, `clips_video_container`,
+ * `clips_ufi_component`, `like_button` / `comment_button` / `save_button`,
+ * `inline_follow_button`; bottom nav: `feed_tab`, `clips_tab`, `direct_tab`,
+ * `search_tab`, `profile_tab`.
  *
  * **Known Limitations:**
- * - Detection patterns may break after major Instagram redesigns.
- * - The 300-node cap may miss Reels signals in unusually deep layouts.
- *
- * **Compatibility:**
- * - Tested with Instagram app versions 300.x - 320.x
- * - May require updates for major Instagram redesigns
+ * - Keyed on Instagram view ids; may need updates after a major Instagram redesign.
+ * - The Explore grid itself (thumbnail browsing) is intentionally not blocked.
  */
 class InstagramReelsDetector : ShortFormContentDetector {
 
@@ -64,51 +60,51 @@ class InstagramReelsDetector : ShortFormContentDetector {
         rootNode: AccessibilityNodeInfo,
         resources: Resources,
     ): Boolean {
-        // Instagram uses clips_viewer for everything, so we need to be very specific
-        // Check if we're in the Reels tab/activity specifically
-
-        val className = event.className?.toString()
-        Timber.v("[Instagram] Event className: $className")
-
         val stack = ArrayDeque<AccessibilityNodeInfo>()
         stack.add(rootNode)
         var nodesScanned = 0
-        var feedTabFound = false
-        var clipsViewerFound = false
+        var clipsTabSelected = false
+        var hasClipsViewer = false
+        var hasFeedTab = false
+        var hasStoryViewer = false
 
-        // Deeper scan: 10 nodes only covered the bottom nav, which is why
-        // "no feed_tab" was used as a (wrong) proxy for Reels.
-        while (stack.isNotEmpty() && nodesScanned < 300) {
+        while (stack.isNotEmpty() && nodesScanned < 400) {
             val n = stack.removeFirst()
             nodesScanned++
             val id = n.viewIdResourceName
-
             if (id != null) {
-                // Stories ("reel_viewer" in Instagram's naming) and Direct: never block.
-                if ("reel_viewer" in id || "direct_" in id || "thread_" in id) {
-                    Timber.v("[Instagram] Stories/Direct screen, skipping ($id)")
-                    return false
+                when {
+                    "reel_viewer" in id -> hasStoryViewer = true
+                    "clips_tab" in id && n.isSelected -> clipsTabSelected = true
+                    "clips_viewer" in id -> hasClipsViewer = true
+                    "feed_tab" in id -> hasFeedTab = true
                 }
-                if ("clips_tab" in id && n.isSelected) {
-                    Timber.i("[Instagram] ✓ Reels tab selected")
-                    return true
-                }
-                if ("feed_tab" in id) feedTabFound = true
-                if ("clips_viewer" in id || "clips_video" in id) clipsViewerFound = true
             }
-
             for (i in 0 until n.childCount) {
                 n.getChild(i)?.let { stack.add(it) }
             }
         }
 
-        // Reels opened from feed/Explore/profile: a positive Reels signal is required,
-        // not just the absence of the bottom navigation.
-        if (clipsViewerFound && !feedTabFound) {
-            Timber.i("[Instagram] ✓ Fullscreen Reels viewer")
+        // Stories use the "reel_viewer" hierarchy and are never blocked.
+        if (hasStoryViewer) {
+            Timber.v("[Instagram] Stories viewer, skipping")
+            return false
+        }
+        // Dedicated Reels tab (bottom-nav Reels selected).
+        if (clipsTabSelected) {
+            Timber.i("[Instagram] ✓ Reels tab selected")
             return true
         }
-        Timber.v("[Instagram] No Reels ($nodesScanned nodes, feedTab=$feedTabFound, clips=$clipsViewerFound)")
+        // Fullscreen Reels player (Direct/Explore/immersive): clips viewer present and
+        // the bottom navigation is gone.
+        if (hasClipsViewer && !hasFeedTab) {
+            Timber.i("[Instagram] ✓ Fullscreen Reels player")
+            return true
+        }
+        Timber.v(
+            "[Instagram] No Reels ($nodesScanned nodes, clipsViewer=$hasClipsViewer, " +
+                "feedTab=$hasFeedTab)",
+        )
         return false
     }
 }

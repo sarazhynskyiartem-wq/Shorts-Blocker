@@ -31,7 +31,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
-import kotlinx.coroutines.launch
 import timber.log.Timber
 import java.util.concurrent.ConcurrentHashMap
 
@@ -98,17 +97,6 @@ class ShortFormContentBlockerService : AccessibilityService() {
                 "Accessibility event: type=${event.eventType}, " +
                     "className=${event.className}, package=$packageName",
             )
-
-            // TEMPORARY DEBUG: dump Instagram screens to Downloads to inspect
-            // Reels player view ids. Remove with DebugTreeDumper once detection is final.
-            if (packageName == "com.instagram.android" &&
-                event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
-            ) {
-                rootInActiveWindow?.let { r ->
-                    val dump = DebugTreeDumper.capture(r, event.className?.toString() ?: "?")
-                    coroutineScope.launch { DebugTreeDumper.append(applicationContext, dump) }
-                }
-            }
 
             // Get the appropriate detector for this package
             val detector = packageName?.let { detectors[it] }
