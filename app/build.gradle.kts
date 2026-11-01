@@ -55,6 +55,14 @@ extensions.configure<ApplicationExtension> {
     }
 
     signingConfigs {
+        // Fixed debug key committed to the repo so every CI build is signed with the
+        // same signature and debug APKs update in place instead of failing to install.
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
         create("release") {
             if (keystorePropertiesFile.exists()) {
                 val keystoreProperties = Properties()
