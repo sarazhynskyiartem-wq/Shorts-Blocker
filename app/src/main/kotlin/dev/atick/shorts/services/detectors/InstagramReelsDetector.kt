@@ -24,26 +24,32 @@ import timber.log.Timber
 /**
  * Detector for Instagram Reels short-form content.
  *
- * This detector identifies when a user is actively watching Instagram Reels using
- * a two-pronged detection strategy: explicit Reels tab detection and fullscreen
- * media detection.
+ * This detector identifies when a user is actively watching Instagram Reels and,
+ * crucially, avoids false positives on Direct messages, Stories and Settings —
+ * screens the previous implementation wrongly treated as Reels.
  *
  * **Detection Strategy:**
- * 1. **Reels Tab Detection**: Checks if "clips_tab" element exists and is selected
- * 2. **Fullscreen Detection**: Detects fullscreen media viewing when feed_tab is absent
+ * 1. **Early exit for non-Reels screens**: if a Stories viewer (`reel_viewer`) or a
+ *    Direct/inbox screen (`direct_`, `thread_`) node is seen, immediately return false.
+ * 2. **Reels tab detection**: if the `clips_tab` node exists and is selected, it's Reels.
+ * 3. **Fullscreen Reels detection**: a positive `clips_viewer`/`clips_video` signal
+ *    combined with the absence of the bottom navigation (`feed_tab`) indicates Reels
+ *    opened from the feed, Explore or a profile.
  *
- * The dual strategy accounts for Instagram's various entry points to Reels content
- * (dedicated tab, explore page, profile reels, etc.)
+ * The key fix over the old logic: Reels is only reported on a *positive* Reels signal.
+ * The mere absence of `feed_tab` is no longer treated as Reels, because Direct, Stories
+ * and Settings also lack it.
  *
  * **Implementation Details:**
- * - Scans up to 10 nodes (shallow scan for performance)
- * - Uses feed_tab absence as indicator of fullscreen viewing
- * - Instagram uses "clips_viewer" for all video content, requiring careful detection
+ * - Performs a breadth-first scan of up to 300 nodes. The previous 10-node scan only
+ *   reached the bottom navigation, which is why "no feed_tab" became a (wrong) proxy
+ *   for Reels.
+ * - Instagram reuses `clips_viewer` widely, so detection relies on combined signals
+ *   rather than any single node.
  *
  * **Known Limitations:**
- * - May trigger on fullscreen regular posts (rare false positives)
- * - Detection patterns may break after Instagram app updates
- * - Does not distinguish between Reels in feed vs dedicated viewing
+ * - Detection patterns may break after major Instagram redesigns.
+ * - The 300-node cap may miss Reels signals in unusually deep layouts.
  *
  * **Compatibility:**
  * - Tested with Instagram app versions 300.x - 320.x
@@ -67,21 +73,28 @@ class InstagramReelsDetector : ShortFormContentDetector {
         val stack = ArrayDeque<AccessibilityNodeInfo>()
         stack.add(rootNode)
         var nodesScanned = 0
-        var feedTabCount = 0
+        var feedTabFound = false
+        var clipsViewerFound = false
 
-        while (stack.isNotEmpty() && nodesScanned < 10) {
+        // Deeper scan: 10 nodes only covered the bottom nav, which is why
+        // "no feed_tab" was used as a (wrong) proxy for Reels.
+        while (stack.isNotEmpty() && nodesScanned < 300) {
             val n = stack.removeFirst()
             nodesScanned++
-
             val id = n.viewIdResourceName
 
-            if (id != null && ("feed_tab" in id)) {
-                feedTabCount++
-            }
-
-            if (id != null && ("clips_tab" in id && n.isSelected)) {
-                Timber.i("[Instagram] ✓ User is actively watching Reels in Reels tab")
-                return true
+            if (id != null) {
+                // Stories ("reel_viewer" in Instagram's naming) and Direct: never block.
+                if ("reel_viewer" in id || "direct_" in id || "thread_" in id) {
+                    Timber.v("[Instagram] Stories/Direct screen, skipping ($id)")
+                    return false
+                }
+                if ("clips_tab" in id && n.isSelected) {
+                    Timber.i("[Instagram] ✓ Reels tab selected")
+                    return true
+                }
+                if ("feed_tab" in id) feedTabFound = true
+                if ("clips_viewer" in id || "clips_video" in id) clipsViewerFound = true
             }
 
             for (i in 0 until n.childCount) {
@@ -89,11 +102,13 @@ class InstagramReelsDetector : ShortFormContentDetector {
             }
         }
 
-        if (feedTabCount == 0) {
-            Timber.i("[Instagram] ✓ User is actively watching Media in Fullscreen")
+        // Reels opened from feed/Explore/profile: a positive Reels signal is required,
+        // not just the absence of the bottom navigation.
+        if (clipsViewerFound && !feedTabFound) {
+            Timber.i("[Instagram] ✓ Fullscreen Reels viewer")
             return true
         }
-        Timber.v("[Instagram] No Reels detected ($nodesScanned nodes scanned, feedTabCount=$feedTabCount)")
+        Timber.v("[Instagram] No Reels ($nodesScanned nodes, feedTab=$feedTabFound, clips=$clipsViewerFound)")
         return false
     }
 }
